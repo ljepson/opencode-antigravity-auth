@@ -189,10 +189,21 @@ export function resolveModelWithTier(requestedModel: string): ResolvedModel {
   const isThinking = isThinkingCapableModel(resolvedModel);
 
   if (!tier) {
-    if (resolvedModel === "gemini-3-flash" && !skipAlias) {
+    // Default thinkingLevel for Gemini 3 flash models (including -preview variants)
+    if (resolvedModel === "gemini-3-flash" || resolvedModel === "gemini-3-flash-preview") {
       return {
         actualModel: resolvedModel,
-        thinkingLevel: "minimal",
+        thinkingLevel: "low",
+        isThinkingModel: true,
+        quotaPreference,
+        explicitQuota,
+      };
+    }
+    // Default thinkingLevel for Gemini 3 pro-preview (no tier suffix)
+    if (resolvedModel === "gemini-3-pro-preview") {
+      return {
+        actualModel: resolvedModel,
+        thinkingLevel: "low",
         isThinkingModel: true,
         quotaPreference,
         explicitQuota,
@@ -201,20 +212,11 @@ export function resolveModelWithTier(requestedModel: string): ResolvedModel {
     return { actualModel: resolvedModel, isThinkingModel: isThinking, quotaPreference, explicitQuota };
   }
 
-  if (resolvedModel.includes("gemini-3") && !skipAlias) {
+  // Gemini 3 models with tier suffix - apply thinkingLevel regardless of skipAlias
+  if (resolvedModel.includes("gemini-3")) {
     return {
       actualModel: resolvedModel,
       thinkingLevel: tier,
-      tier,
-      isThinkingModel: true,
-      quotaPreference,
-      explicitQuota,
-    };
-  }
-
-  if (skipAlias) {
-    return {
-      actualModel: resolvedModel,
       tier,
       isThinkingModel: true,
       quotaPreference,
