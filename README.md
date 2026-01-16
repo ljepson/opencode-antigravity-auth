@@ -419,7 +419,7 @@ Create `~/.config/opencode/antigravity.json` (or `.opencode/antigravity.json` in
 | `debug` | `false` | Enable debug logging to file |
 | `log_dir` | OS default | Custom directory for debug logs |
 | `auto_update` | `true` | Enable automatic plugin updates |
-| `keep_thinking` | `false` | ⚠️ **Experimental.** Preserve Claude's thinking blocks via signature caching. Required for conversation continuity when using thinking models. See [Signature Cache](#signature-cache) for cache settings. |
+| `keep_thinking` | `false` | ⚠️ **Experimental.** Preserve Claude's thinking blocks via signature caching. Enables conversation continuity but may cause instability and errors. See [Signature Cache](#signature-cache) for cache settings. |
 
 ### Session Recovery
 
