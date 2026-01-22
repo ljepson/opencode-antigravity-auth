@@ -355,23 +355,70 @@ export const AntigravityConfigSchema = z.object({
   // Web Search (Gemini Grounding)
   // =========================================================================
 
-  web_search: z.object({
-    /**
-     * Default mode for web search when not specified by variant.
-     * - `auto`: Model decides when to search (dynamic retrieval).
-     * - `off`: Search is disabled by default.
-     * @default "off"
-     */
-    default_mode: z.enum(['auto', 'off']).default('off'),
+   web_search: z.object({
+     /**
+      * Default mode for web search when not specified by variant.
+      * - `auto`: Model decides when to search (dynamic retrieval).
+      * - `off`: Search is disabled by default.
+      * @default "off"
+      */
+     default_mode: z.enum(['auto', 'off']).default('off'),
 
-    /**
-     * Dynamic retrieval threshold (0.0 to 1.0).
-     * Higher values make the model search LESS often (requires higher confidence to trigger search).
-     * Only applies in 'auto' mode.
-     * @default 0.3
-     */
-    grounding_threshold: z.number().min(0).max(1).default(0.3),
-  }).optional(),
+     /**
+      * Dynamic retrieval threshold (0.0 to 1.0).
+      * Higher values make the model search LESS often (requires higher confidence to trigger search).
+      * Only applies in 'auto' mode.
+      * @default 0.3
+      */
+     grounding_threshold: z.number().min(0).max(1).default(0.3),
+   }).optional(),
+
+   // =========================================================================
+   // OpenAI-Compatible Mode
+   // =========================================================================
+   
+   /**
+    * OpenAI-compatible API mode configuration.
+    * When enabled, transforms requests/responses to/from OpenAI Chat Completions format.
+    * This allows using the plugin with @ai-sdk/openai-compatible SDK.
+    */
+   openai_compat: z.object({
+     /**
+      * Enable OpenAI-compatible API mode.
+      * When true, the plugin accepts OpenAI Chat Completions format and transforms
+      * requests/responses automatically.
+      * 
+      * @default false
+      */
+     enabled: z.boolean().default(false),
+     
+     /**
+      * Auto-detect OpenAI format requests.
+      * When true, automatically detects if incoming request is in OpenAI format
+      * (has 'messages' array with OpenAI shape) and transforms accordingly.
+      * When false, only transforms when explicitly enabled.
+      * 
+      * @default true
+      */
+     auto_detect: z.boolean().default(true),
+     
+     /**
+      * Models to expose via OpenAI-compatible API.
+      * If empty, all Claude models are available.
+      * 
+      * @default []
+      */
+     models: z.array(z.string()).default([]),
+     
+     /**
+      * Map 429 errors to 400 to prevent SDK retry loops.
+      * OpenAI SDKs have their own retry logic which conflicts with plugin's
+      * account rotation. Setting this to true returns 400 instead of 429.
+      * 
+      * @default true
+      */
+     convert_429_to_400: z.boolean().default(true),
+   }).optional(),
 });
 
 export type AntigravityConfig = z.infer<typeof AntigravityConfigSchema>;
@@ -428,5 +475,11 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   web_search: {
     default_mode: 'off',
     grounding_threshold: 0.3,
+  },
+  openai_compat: {
+    enabled: false,
+    auto_detect: true,
+    models: [],
+    convert_429_to_400: true,
   },
 };
