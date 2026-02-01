@@ -535,7 +535,7 @@ export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
     const content = JSON.stringify(merged, null, 2);
 
     try {
-      await fs.writeFile(tempPath, content, "utf-8");
+      await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
       await fs.rename(tempPath, path);
     } catch (error) {
       // Clean up temp file on failure to prevent accumulation
