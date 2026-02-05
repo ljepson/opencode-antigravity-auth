@@ -1026,7 +1026,9 @@ export const createAntigravityPlugin = (providerId: string) => async (
             checkAborted();
             
             const accountCount = accountManager.getAccountCount();
-            
+            const preferredHeaderStyle = getHeaderStyleFromUrl(urlString, family);
+            const explicitQuota = isExplicitQuotaFromUrl(urlString);
+
             if (accountCount === 0) {
               throw new Error("No Antigravity accounts available. Run `opencode auth login`.");
             }
@@ -1035,18 +1037,16 @@ export const createAntigravityPlugin = (providerId: string) => async (
               family, 
               model, 
               config.account_selection_strategy,
-              'antigravity',
+              preferredHeaderStyle,
               config.pid_offset_enabled,
             );
             
             if (!account) {
-              const headerStyle = getHeaderStyleFromUrl(urlString, family);
-              const explicitQuota = isExplicitQuotaFromUrl(urlString);
               // All accounts are rate-limited - wait and retry
               const waitMs = accountManager.getMinWaitTimeForFamily(
                 family,
                 model,
-                headerStyle,
+                preferredHeaderStyle,
                 explicitQuota,
               ) || 60_000;
               const waitSecValue = Math.max(1, Math.ceil(waitMs / 1000));
@@ -1294,8 +1294,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
             // - Models with :antigravity suffix -> use Antigravity quota
             // - Models without suffix (default) -> use Gemini CLI quota
             // - Claude models -> always use Antigravity
-            let headerStyle = getHeaderStyleFromUrl(urlString, family);
-            const explicitQuota = isExplicitQuotaFromUrl(urlString);
+            let headerStyle = preferredHeaderStyle;
             pushDebug(`headerStyle=${headerStyle} explicit=${explicitQuota}`);
             if (account.fingerprint) {
               pushDebug(`fingerprint: quotaUser=${account.fingerprint.quotaUser} deviceId=${account.fingerprint.deviceId.slice(0, 8)}...`);
