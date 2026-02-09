@@ -25,7 +25,7 @@ For Gemini models, the plugin accesses **two independent quota pools** per accou
 | Quota Pool | When Used |
 |------------|-----------|
 | **Antigravity** | Default for all requests |
-| **Gemini CLI** | Automatic fallback when Antigravity exhausted on ALL accounts |
+| **Gemini CLI** | Automatic fallback between Antigravity and Gemini CLI in both directions |
 
 This effectively **doubles your Gemini quota** through automatic fallback between Antigravity and Gemini CLI pools.
 
