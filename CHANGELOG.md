@@ -45,7 +45,10 @@
 - **#381**: Disabled accounts no longer selected via sticky index. `getCurrentAccountForFamily()` now skips disabled accounts and advances the active index
 - **#384**: `google_search` tool no longer returns empty citations when using `gemini-3-flash`. Search model switched to `gemini-2.5-flash`
 - **#377**: Configure models flow now respects existing `opencode.jsonc` files instead of creating duplicate `opencode.json`
+- **#259**: Claude variant thinking budget now correctly extracted from `generationConfig` fallback when `providerOptions` is absent. Previously, model variants (e.g. `--variant=low` with `thinkingBudget: 8192`) were silently ignored and the default 32768 was always used. Uses strict `=== undefined` check to preserve explicit `thinkingBudget: 0`
+- **#422**: JSON schema (`antigravity.schema.json`) synced with Zod config schema. Added 8 missing properties: `toast_scope`, `scheduling_mode`, `max_cache_first_wait_seconds`, `failure_ttl_seconds`, `request_jitter_max_ms`, `soft_quota_threshold_percent`, `quota_refresh_interval_minutes`, `soft_quota_cache_ttl_minutes`. Added descriptions and deprecation note to `quota_fallback`
 - **Excessive Disk Writes** - Fixed project context auth updates causing 3000+ writes/sec during streaming. Changed from reference equality to value comparison on auth tokens and added throttled saves. Prevents SSD wear on macOS
+- **Delete Last Account Flow** - Deleting the last account no longer returns synthetic empty OAuth credentials with a manual reauthentication message. Instead, the auth flow continues immediately into fresh login mode (PR #430, @Qwinty)
 - **Fingerprint Alignment** - Force-regenerated fingerprints to match current Antigravity Manager behavior, fixing `ideType` and stripping stale client metadata fields
 
 ### Removed
