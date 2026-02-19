@@ -20,6 +20,7 @@ import { defaultSignatureStore } from "./stores/signature-store";
 import {
   DEBUG_MESSAGE_PREFIX,
   isDebugEnabled,
+  isDebugTuiEnabled,
   logAntigravityDebugResponse,
   logCacheStats,
   type AntigravityDebugContext,
@@ -334,6 +335,65 @@ function stripInjectedDebugFromRequestPayload(payload: Record<string, unknown>):
 
       return message;
     });
+  }
+}
+
+function isValidRequestPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") {
+    return false;
+  }
+
+  const record = part as Record<string, unknown>;
+
+  return (
+    Object.prototype.hasOwnProperty.call(record, "text") ||
+    Object.prototype.hasOwnProperty.call(record, "functionCall") ||
+    Object.prototype.hasOwnProperty.call(record, "functionResponse") ||
+    Object.prototype.hasOwnProperty.call(record, "inlineData") ||
+    Object.prototype.hasOwnProperty.call(record, "fileData") ||
+    Object.prototype.hasOwnProperty.call(record, "executableCode") ||
+    Object.prototype.hasOwnProperty.call(record, "codeExecutionResult") ||
+    Object.prototype.hasOwnProperty.call(record, "thought")
+  );
+}
+
+function sanitizeRequestPayloadForAntigravity(payload: Record<string, unknown>): void {
+  const anyPayload = payload as any;
+
+  if (Array.isArray(anyPayload.contents)) {
+    anyPayload.contents = anyPayload.contents
+      .map((content: unknown) => {
+        if (!content || typeof content !== "object") {
+          return null;
+        }
+
+        const contentRecord = content as Record<string, unknown>;
+        const rawParts = Array.isArray(contentRecord.parts) ? contentRecord.parts : [];
+        const sanitizedParts = rawParts.filter(isValidRequestPart);
+
+        if (sanitizedParts.length === 0) {
+          return null;
+        }
+
+        return {
+          ...contentRecord,
+          parts: sanitizedParts,
+        };
+      })
+      .filter((content: unknown): content is Record<string, unknown> => content !== null);
+  }
+
+  const systemInstruction = anyPayload.systemInstruction;
+  if (systemInstruction && typeof systemInstruction === "object" && !Array.isArray(systemInstruction)) {
+    const sys = systemInstruction as Record<string, unknown>;
+    if (Array.isArray(sys.parts)) {
+      const sanitizedSystemParts = sys.parts.filter(isValidRequestPart);
+      if (sanitizedSystemParts.length > 0) {
+        sys.parts = sanitizedSystemParts;
+      } else {
+        delete anyPayload.systemInstruction;
+      }
+    }
   }
 }
 
@@ -1177,6 +1237,29 @@ export function prepareAntigravityRequest(
         const conversationKey = resolveConversationKey(requestPayload);
         signatureSessionKey = buildSignatureSessionKey(PLUGIN_SESSION_ID, effectiveModel, conversationKey, resolveProjectKey(projectId));
 
+        // Ensure thoughtSignature is present on all functionCall parts if at least one part has it
+        // This is required by Gemini 3.1 Pro which otherwise fails with 400 Bad Request
+        if (Array.isArray(requestPayload.contents)) {
+          requestPayload.contents = requestPayload.contents.map((content: any) => {
+            if (!content || !Array.isArray(content.parts)) return content;
+            
+            // Find if any part has a thoughtSignature
+            const signature = content.parts.find((p: any) => p && typeof p === "object" && typeof p.thoughtSignature === "string")?.thoughtSignature;
+            
+            if (signature) {
+              const newParts = content.parts.map((p: any) => {
+                if (p && typeof p === "object" && p.functionCall && !p.thoughtSignature) {
+                  return { ...p, thoughtSignature: signature };
+                }
+                return p;
+              });
+              return { ...content, parts: newParts };
+            }
+            
+            return content;
+          });
+        }
+
         // For Claude models, filter out unsigned thinking blocks (required by Claude API)
         // Attempts to restore signatures from cache for multi-turn conversations
         // Handle both Gemini-style contents[] and Anthropic-style messages[] payloads.
@@ -1316,6 +1399,7 @@ export function prepareAntigravityRequest(
         }
 
         stripInjectedDebugFromRequestPayload(requestPayload);
+        sanitizeRequestPayloadForAntigravity(requestPayload);
 
         const effectiveProjectId = projectId?.trim() || (headerStyle === "antigravity" ? generateSyntheticProjectId() : "");
         resolvedProjectId = effectiveProjectId;
@@ -1506,7 +1590,7 @@ export async function transformAntigravityResponse(
   // - If keep_thinking=true (but no debug): inject placeholder to trigger signature caching
   // Both use the same injection path (injectDebugThinking) for consistent behavior
   const debugText =
-    isDebugEnabled() && Array.isArray(debugLines) && debugLines.length > 0
+    isDebugTuiEnabled() && Array.isArray(debugLines) && debugLines.length > 0
       ? formatDebugLinesForThinking(debugLines)
       : getKeepThinking()
         ? SYNTHETIC_THINKING_PLACEHOLDER
@@ -1553,6 +1637,8 @@ export async function transformAntigravityResponse(
     });
   }
 
+  const responseFallback = response.clone();
+
   try {
     const headers = new Headers(response.headers);
     const text = await response.text();
@@ -1567,12 +1653,16 @@ export async function transformAntigravityResponse(
 
       // Inject Debug Info
       if (errorBody?.error) {
+        const rawErrorMessage =
+          typeof errorBody.error.message === "string" && errorBody.error.message.length > 0
+            ? errorBody.error.message
+            : "Unknown error";
+        const errorType = detectErrorType(rawErrorMessage);
         const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || "Unknown"}\nEffective Model: ${effectiveModel || "Unknown"}\nProject: ${projectId || "Unknown"}\nEndpoint: ${endpoint || "Unknown"}\nStatus: ${response.status}\nRequest ID: ${headers.get("x-request-id") || "N/A"}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ""}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ""}${toolDebugPayload ? `\nTool Debug Payload: ${toolDebugPayload}` : ""}`;
         const injectedDebug = debugText ? `\n\n${debugText}` : "";
-        errorBody.error.message = (errorBody.error.message || "Unknown error") + debugInfo + injectedDebug;
+        errorBody.error.message = rawErrorMessage + debugInfo + injectedDebug;
 
         // Check if this is a recoverable thinking error - throw to trigger retry
-        const errorType = detectErrorType(errorBody.error.message || "");
         if (errorType === "thinking_block_order") {
           const recoveryError = new Error("THINKING_RECOVERY_NEEDED");
           (recoveryError as any).recoveryType = errorType;
@@ -1694,11 +1784,15 @@ export async function transformAntigravityResponse(
 
     return new Response(text, init);
   } catch (error) {
+    if (error instanceof Error && error.message === "THINKING_RECOVERY_NEEDED") {
+      throw error;
+    }
+
     logAntigravityDebugResponse(debugContext, response, {
       error,
       note: "Failed to transform Antigravity response",
     });
-    return response;
+    return responseFallback;
   }
 }
 

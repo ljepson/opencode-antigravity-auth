@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   prepareAntigravityRequest,
+  transformAntigravityResponse,
   getPluginSessionId,
   isGenerativeLanguageRequest,
   __testExports,
@@ -517,6 +518,31 @@ describe("request.ts", () => {
   });
 
   describe("prepareAntigravityRequest", () => {
+    it("copies thoughtSignature to all functionCall parts in the same turn", () => {
+      const mockPayload = {
+        contents: [
+          {
+            role: "model",
+            parts: [
+              { functionCall: { name: "foo", args: {} }, thoughtSignature: "signature-123" },
+              { functionCall: { name: "bar", args: {} } }
+            ]
+          }
+        ]
+      };
+      
+      const result = prepareAntigravityRequest(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent",
+        { method: "POST", body: JSON.stringify(mockPayload) },
+        "test-token",
+        "test-project"
+      );
+      
+      const parsedBody = JSON.parse(result.init.body as string);
+      expect(parsedBody.request.contents[0].parts[0].thoughtSignature).toBe("signature-123");
+      expect(parsedBody.request.contents[0].parts[1].thoughtSignature).toBe("signature-123");
+    });
+
     const mockAccessToken = "test-token";
     const mockProjectId = "test-project";
 
@@ -731,6 +757,61 @@ it("removes x-api-key header", () => {
       expect(result.streaming).toBe(false);
     });
 
+    it("removes contents entries with empty or invalid parts", () => {
+      const result = prepareAntigravityRequest(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            contents: [
+              { role: "user", parts: [] },
+              { role: "model", parts: [null, { text: "kept" }] },
+              { role: "user", parts: null },
+            ],
+            systemInstruction: {
+              role: "user",
+              parts: [null, { text: "system kept" }],
+            },
+          }),
+        },
+        mockAccessToken,
+        mockProjectId,
+        undefined,
+        "gemini-cli",
+      );
+
+      const wrapped = JSON.parse(result.init.body as string);
+      expect(wrapped.request.contents).toHaveLength(1);
+      expect(wrapped.request.contents[0]).toEqual({
+        role: "model",
+        parts: [{ text: "kept" }],
+      });
+      expect(wrapped.request.systemInstruction.parts).toEqual([{ text: "system kept" }]);
+    });
+
+    it("drops systemInstruction when all parts are invalid", () => {
+      const result = prepareAntigravityRequest(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: "hi" }] }],
+            systemInstruction: {
+              role: "user",
+              parts: [null],
+            },
+          }),
+        },
+        mockAccessToken,
+        mockProjectId,
+        undefined,
+        "gemini-cli",
+      );
+
+      const wrapped = JSON.parse(result.init.body as string);
+      expect(wrapped.request.systemInstruction).toBeUndefined();
+    });
+
     it("preserves headerStyle in response", () => {
       const result = prepareAntigravityRequest(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
@@ -768,6 +849,30 @@ it("removes x-api-key header", () => {
         expect(result.effectiveModel).toBe("gemini-3-pro-low");
       });
 
+      it("transforms gemini-3.1-pro-preview to gemini-3.1-pro-low for antigravity headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "antigravity"
+        );
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-low");
+      });
+
+      it("transforms gemini-3.1-pro-preview-customtools to gemini-3.1-pro-low for antigravity headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview-customtools:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "antigravity"
+        );
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-low");
+      });
+
       it("transforms gemini-3-flash to gemini-3-flash-preview for gemini-cli headerStyle", () => {
         const result = prepareAntigravityRequest(
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent",
@@ -792,6 +897,30 @@ it("removes x-api-key header", () => {
         expect(result.effectiveModel).toBe("gemini-3-pro-preview");
       });
 
+      it("transforms gemini-3.1-pro-low to gemini-3.1-pro-preview for gemini-cli headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-low:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "gemini-cli"
+        );
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-preview");
+      });
+
+      it("keeps gemini-3.1-pro-preview-customtools unchanged for gemini-cli headerStyle", () => {
+        const result = prepareAntigravityRequest(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview-customtools:generateContent",
+          { method: "POST", body: JSON.stringify({ contents: [] }) },
+          mockAccessToken,
+          mockProjectId,
+          undefined,
+          "gemini-cli"
+        );
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-preview-customtools");
+      });
+
       it("keeps non-Gemini-3 models unchanged regardless of headerStyle", () => {
         const result = prepareAntigravityRequest(
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
@@ -803,6 +932,68 @@ it("removes x-api-key header", () => {
         );
         expect(result.effectiveModel).toBe("gemini-2.5-flash");
       });
+    });
+  });
+
+  describe("transformAntigravityResponse", () => {
+    it("does not misclassify generic INVALID_ARGUMENT as thinking recovery from debug metadata", async () => {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            code: 400,
+            message: "Request contains an invalid argument.",
+            status: "INVALID_ARGUMENT",
+          },
+        }),
+        {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      const transformed = await transformAntigravityResponse(
+        response,
+        true,
+        undefined,
+        "antigravity-claude-opus-4-6-thinking",
+        "test-project",
+        "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+        "claude-opus-4-6-thinking",
+        "session-1",
+        0,
+        "expected=1 found=0",
+      );
+
+      await expect(transformed.text()).resolves.toContain("Request contains an invalid argument.");
+    });
+
+    it("rethrows THINKING_RECOVERY_NEEDED for outer retry handling", async () => {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            code: 400,
+            message: "Thinking must start with a thinking block before tool use.",
+            status: "INVALID_ARGUMENT",
+          },
+        }),
+        {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        },
+      );
+
+      await expect(
+        transformAntigravityResponse(
+          response,
+          true,
+          undefined,
+          "antigravity-claude-opus-4-6-thinking",
+          "test-project",
+          "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+          "claude-opus-4-6-thinking",
+          "session-1",
+        ),
+      ).rejects.toMatchObject({ message: "THINKING_RECOVERY_NEEDED" });
     });
   });
 });
