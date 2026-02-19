@@ -1,4 +1,4 @@
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { env } from "node:process";
@@ -67,8 +67,42 @@ function getLogsDir(customLogDir?: string): string {
  * Builds a timestamped log file path.
  */
 function createLogFilePath(customLogDir?: string): string {
+  const logsDir = getLogsDir(customLogDir);
+  cleanupOldLogs(logsDir, 25);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return join(getLogsDir(customLogDir), `antigravity-debug-${timestamp}.log`);
+  return join(logsDir, `antigravity-debug-${timestamp}.log`);
+}
+
+/**
+ * Cleans up old log files, keeping only the most recent maxFiles.
+ */
+function cleanupOldLogs(logsDir: string, maxFiles: number): void {
+  try {
+    const files = readdirSync(logsDir)
+      .filter((file) => file.startsWith("antigravity-debug-") && file.endsWith(".log"))
+      .map((file) => join(logsDir, file));
+
+    if (files.length <= maxFiles) {
+      return;
+    }
+
+    const sortedFiles = files
+      .map((file) => ({
+        file,
+        mtime: statSync(file).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    for (let i = maxFiles; i < sortedFiles.length; i++) {
+      try {
+        unlinkSync(sortedFiles[i]!.file);
+      } catch {
+        // Ignore deletion errors
+      }
+    }
+  } catch {
+    // Ignore directory read errors
+  }
 }
 
 /**
