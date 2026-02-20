@@ -113,7 +113,7 @@ async function runBackgroundUpdateCheck(
   }
 
   if (pluginInfo.isPinned) {
-    const updated = updatePinnedVersion(pluginInfo.configPath, pluginInfo.entry, latestVersion);
+    const updated = await updatePinnedVersion(pluginInfo.configPath, pluginInfo.entry, latestVersion);
     if (updated) {
       invalidatePackage(PACKAGE_NAME);
       await showAutoUpdatedToast(client, currentVersion, latestVersion);

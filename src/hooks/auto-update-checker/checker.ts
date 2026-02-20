@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import lockfile from "proper-lockfile";
 import type { NpmDistTags, OpencodeConfig, PackageJson, UpdateCheckResult } from "./types";
 import {
   PACKAGE_NAME,
@@ -164,9 +165,12 @@ export function getCachedVersion(): string | null {
   return null;
 }
 
-export function updatePinnedVersion(configPath: string, oldEntry: string, newVersion: string): boolean {
+export async function updatePinnedVersion(configPath: string, oldEntry: string, newVersion: string): Promise<boolean> {
+  let release: (() => Promise<void>) | undefined;
   try {
-    const content = fs.readFileSync(configPath, "utf-8");
+    release = await lockfile.lock(configPath, { retries: 5 });
+    
+    const content = await fs.promises.readFile(configPath, "utf-8");
     const newEntry = `${PACKAGE_NAME}@${newVersion}`;
 
     const pluginMatch = content.match(/"plugin"\s*:\s*\[/);
@@ -205,12 +209,16 @@ export function updatePinnedVersion(configPath: string, oldEntry: string, newVer
       return false;
     }
 
-    fs.writeFileSync(configPath, updatedContent, "utf-8");
+    await fs.promises.writeFile(configPath, updatedContent, "utf-8");
     debugLog(`[auto-update-checker] Updated ${configPath}: ${oldEntry} → ${newEntry}`);
     return true;
   } catch (err) {
     console.error(`[auto-update-checker] Failed to update config file ${configPath}:`, err);
     return false;
+  } finally {
+    if (release) {
+      await release().catch(() => {});
+    }
   }
 }
 
