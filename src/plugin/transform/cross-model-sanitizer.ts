@@ -24,7 +24,7 @@ export interface SanitizationResult {
   signaturesStripped: number;
 }
 
-const GEMINI_SIGNATURE_FIELDS = ["thoughtSignature", "thinkingMetadata"] as const;
+const GEMINI_SIGNATURE_FIELDS = ["thoughtSignature", "thinkingMetadata", "thinkingConfig"] as const;
 const CLAUDE_SIGNATURE_FIELDS = ["signature"] as const;
 
 export function getModelFamily(model: string): ModelFamily {
@@ -50,6 +50,11 @@ export function stripGeminiThinkingMetadata(
 
   if ("thinkingMetadata" in part) {
     delete part.thinkingMetadata;
+    stripped++;
+  }
+
+  if ("thinkingConfig" in part) {
+    delete part.thinkingConfig;
     stripped++;
   }
 
@@ -141,6 +146,34 @@ function sanitizeParts(
   return { parts: sanitizedParts, stripped: totalStripped };
 }
 
+function sanitizeRootThinkingConfig(
+  payload: Record<string, unknown>,
+  targetFamily: ModelFamily,
+): number {
+  if (targetFamily !== "claude") {
+    return 0;
+  }
+
+  let stripped = 0;
+  const rawGenerationConfig = payload.generationConfig;
+  if (isPlainObject(rawGenerationConfig) && "thinkingConfig" in rawGenerationConfig) {
+    delete (rawGenerationConfig as Record<string, unknown>).thinkingConfig;
+    stripped++;
+  }
+
+  if (isPlainObject(payload.extra_body) && "thinkingConfig" in payload.extra_body) {
+    delete (payload.extra_body as Record<string, unknown>).thinkingConfig;
+    stripped++;
+  }
+
+  if ("thinkingConfig" in payload) {
+    delete payload.thinkingConfig;
+    stripped++;
+  }
+
+  return stripped;
+}
+
 function sanitizeContents(
   contents: unknown[],
   targetFamily: ModelFamily,
@@ -208,6 +241,7 @@ export function deepSanitizeCrossModelMetadata(
 
   let totalStripped = 0;
   const result = { ...obj } as Record<string, unknown>;
+  totalStripped += sanitizeRootThinkingConfig(result, targetFamily);
 
   if (Array.isArray(result.contents)) {
     const sanitized = sanitizeContents(
@@ -299,6 +333,7 @@ export function sanitizeCrossModelPayloadInPlace(
 
   const preserveNonSignature = options.preserveNonSignatureMetadata ?? true;
   let totalStripped = 0;
+  totalStripped += sanitizeRootThinkingConfig(payload, targetFamily);
 
   const sanitizePartsInPlace = (parts: unknown[]): void => {
     for (const part of parts) {
@@ -343,6 +378,13 @@ export function sanitizeCrossModelPayloadInPlace(
           sanitizePartsInPlace(message.content);
         }
       }
+    }
+  }
+
+  if (Array.isArray(payload.requests)) {
+    for (const req of payload.requests) {
+      if (!isPlainObject(req)) continue;
+      totalStripped += sanitizeCrossModelPayloadInPlace(req as Record<string, unknown>, options);
     }
   }
 
