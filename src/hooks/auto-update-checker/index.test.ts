@@ -128,7 +128,7 @@ describe("Auto Update Checker", () => {
       }));
       vi.mocked(getCachedVersion).mockReturnValue(null);
       vi.mocked(getLatestVersion).mockResolvedValue("1.2.6");
-      vi.mocked(updatePinnedVersion).mockReturnValue(true);
+      vi.mocked(updatePinnedVersion).mockReturnValue(Promise.resolve(true));
 
       const hook = createAutoUpdateCheckerHook(client, "/test", { autoUpdate: true });
       hook.event({ event: { type: "session.created" } });
