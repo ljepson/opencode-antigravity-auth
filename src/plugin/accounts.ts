@@ -58,7 +58,14 @@ export function parseRateLimitReason(
     switch (reason.toUpperCase()) {
       case "QUOTA_EXHAUSTED": return "QUOTA_EXHAUSTED";
       case "RATE_LIMIT_EXCEEDED": return "RATE_LIMIT_EXCEEDED";
+      case "TOO_MANY_REQUESTS": return "RATE_LIMIT_EXCEEDED";
+      case "RATE_LIMITED": return "RATE_LIMIT_EXCEEDED";
       case "MODEL_CAPACITY_EXHAUSTED": return "MODEL_CAPACITY_EXHAUSTED";
+      case "RESOURCE_EXHAUSTED": return "MODEL_CAPACITY_EXHAUSTED";
+      case "UNAVAILABLE": return "SERVER_ERROR";
+      case "SERVICE_UNAVAILABLE": return "SERVER_ERROR";
+      case "INTERNAL": return "SERVER_ERROR";
+      case "INTERNAL_ERROR": return "SERVER_ERROR";
     }
   }
   
@@ -67,15 +74,34 @@ export function parseRateLimitReason(
     const lower = message.toLowerCase();
     
     // Capacity / Overloaded (Transient) - Check FIRST before "exhausted"
-    if (lower.includes("capacity") || lower.includes("overloaded") || lower.includes("resource exhausted")) {
+    if (
+      lower.includes("capacity") ||
+      lower.includes("overloaded") ||
+      lower.includes("resource exhausted") ||
+      lower.includes("resource_exhausted")
+    ) {
       return "MODEL_CAPACITY_EXHAUSTED";
     }
 
     // RPM / TPM (Short Wait)
     // "per minute", "rate limit", "too many requests"
     // "presque" (French: almost) - retained for i18n parity with Rust reference
-    if (lower.includes("per minute") || lower.includes("rate limit") || lower.includes("too many requests") || lower.includes("presque")) {
+    if (
+      lower.includes("per minute") ||
+      lower.includes("rate limit") ||
+      lower.includes("too many requests") ||
+      lower.includes("rate_limited") ||
+      lower.includes("presque")
+    ) {
       return "RATE_LIMIT_EXCEEDED";
+    }
+
+    if (
+      lower.includes("service unavailable") ||
+      lower.includes("temporarily unavailable") ||
+      lower.includes("internal error")
+    ) {
+      return "SERVER_ERROR";
     }
 
     // Quota (Long Wait)

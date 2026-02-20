@@ -454,6 +454,52 @@ describe("cross-model-sanitizer", () => {
 
       expect(stripped).toBe(1);
     });
+
+    it("strips Gemini thinkingConfig fields when target is Claude", () => {
+      const payload = {
+        thinkingConfig: { thinkingBudget: 8192 },
+        generationConfig: { thinkingConfig: { thinkingBudget: 4096 } },
+        extra_body: { thinkingConfig: { thinkingBudget: 2048 } },
+      };
+
+      const stripped = sanitizeCrossModelPayloadInPlace(
+        payload as Record<string, unknown>,
+        { targetModel: "claude-opus-4-6-thinking-high" },
+      );
+
+      expect(stripped).toBe(3);
+      expect((payload as any).thinkingConfig).toBeUndefined();
+      expect((payload as any).generationConfig.thinkingConfig).toBeUndefined();
+      expect((payload as any).extra_body.thinkingConfig).toBeUndefined();
+    });
+
+    it("sanitizes nested requests in place", () => {
+      const payload = {
+        requests: [
+          {
+            messages: [
+              {
+                content: [
+                  {
+                    type: "thinking",
+                    thinking: "x",
+                    signature: "a".repeat(80),
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+
+      const stripped = sanitizeCrossModelPayloadInPlace(
+        payload as Record<string, unknown>,
+        { targetModel: "gemini-3-pro-low" },
+      );
+
+      expect(stripped).toBe(1);
+      expect((payload as any).requests[0].messages[0].content[0].signature).toBeUndefined();
+    });
   });
 
   describe("real-world reproduction scenario", () => {

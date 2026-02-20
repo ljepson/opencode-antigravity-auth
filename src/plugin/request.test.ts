@@ -940,35 +940,66 @@ it("removes x-api-key header", () => {
       );
 
       await expect(transformed.text()).resolves.toContain("Request contains an invalid argument.");
+      expect(transformed.headers.get("x-antigravity-recovery-needed")).toBeNull();
     });
 
-    it("rethrows THINKING_RECOVERY_NEEDED for outer retry handling", async () => {
+    it("extracts fallback message from error.status when error.message is missing", async () => {
       const response = new Response(
         JSON.stringify({
           error: {
-            code: 400,
-            message: "Thinking must start with a thinking block before tool use.",
             status: "INVALID_ARGUMENT",
+            details: [{ "@type": "type.googleapis.com/google.rpc.BadRequest" }],
           },
         }),
         {
           status: 400,
-          headers: { "content-type": "application/json" },
+          headers: { "Content-Type": "application/json" },
         },
       );
 
-      await expect(
-        transformAntigravityResponse(
-          response,
-          true,
-          undefined,
-          "antigravity-claude-opus-4-6-thinking",
-          "test-project",
-          "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
-          "claude-opus-4-6-thinking",
-          "session-1",
-        ),
-      ).rejects.toMatchObject({ message: "THINKING_RECOVERY_NEEDED" });
+      const transformed = await transformAntigravityResponse(response, false);
+      const body = await transformed.json() as any;
+
+      expect(transformed.status).toBe(400);
+      expect(body.error.message).toContain("INVALID_ARGUMENT");
+    });
+
+    it("handles batch-style error.errors[] fallback when message is missing", async () => {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            errors: [{ status: "RESOURCE_EXHAUSTED" }],
+          },
+        }),
+        {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      const transformed = await transformAntigravityResponse(response, false);
+      const body = await transformed.json() as any;
+
+      expect(transformed.status).toBe(429);
+      expect(body.error.message).toContain("RESOURCE_EXHAUSTED");
+    });
+
+    it("signals thinking recovery with a response header instead of throwing", async () => {
+      const response = new Response(
+        JSON.stringify({
+          error: {
+            status: "INVALID_ARGUMENT",
+            details: [{ reason: "thinking must start with first block" }],
+          },
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+
+      const transformed = await transformAntigravityResponse(response, false);
+      expect(transformed.headers.get("x-antigravity-recovery-needed")).toBe("thinking_block_order");
     });
   });
 });

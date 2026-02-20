@@ -827,11 +827,9 @@ export function prepareAntigravityRequest(
           // Use stable session ID for signature caching across multi-turn conversations
           (req as any).sessionId = signatureSessionKey;
           stripInjectedDebugFromRequestPayload(req as Record<string, unknown>);
+          sanitizeCrossModelPayloadInPlace(req, { targetModel: effectiveModel });
 
           if (isClaude) {
-            // Step 0: Sanitize cross-model metadata (strips Gemini signatures when sending to Claude)
-            sanitizeCrossModelPayloadInPlace(req, { targetModel: effectiveModel });
-
             // Step 1: Strip corrupted/unsigned thinking blocks FIRST
             deepFilterThinkingBlocks(req, signatureSessionKey, getCachedSignature, true);
 
@@ -1270,10 +1268,8 @@ export function prepareAntigravityRequest(
         // For Claude models, filter out unsigned thinking blocks (required by Claude API)
         // Attempts to restore signatures from cache for multi-turn conversations
         // Handle both Gemini-style contents[] and Anthropic-style messages[] payloads.
+        sanitizeCrossModelPayloadInPlace(requestPayload, { targetModel: effectiveModel });
         if (isClaude) {
-          // Step 0: Sanitize cross-model metadata (strips Gemini signatures when sending to Claude)
-          sanitizeCrossModelPayloadInPlace(requestPayload, { targetModel: effectiveModel });
-
           // Step 1: Strip corrupted/unsigned thinking blocks FIRST
           deepFilterThinkingBlocks(requestPayload, signatureSessionKey, getCachedSignature, true);
 
@@ -1588,6 +1584,49 @@ export async function transformAntigravityResponse(
   toolDebugPayload?: string,
   debugLines?: string[],
 ): Promise<Response> {
+  const extractBestErrorMessage = (errorValue: unknown): string => {
+    if (!errorValue || typeof errorValue !== "object") {
+      return "";
+    }
+
+    const errorObj = errorValue as Record<string, unknown>;
+    if (typeof errorObj.message === "string" && errorObj.message.trim()) {
+      return errorObj.message;
+    }
+    if (typeof errorObj.status === "string" && errorObj.status.trim()) {
+      return errorObj.status;
+    }
+
+    if (Array.isArray(errorObj.details) && errorObj.details.length > 0) {
+      const firstDetail = errorObj.details[0];
+      if (firstDetail && typeof firstDetail === "object") {
+        const detailRecord = firstDetail as Record<string, unknown>;
+        if (typeof detailRecord.reason === "string" && detailRecord.reason.trim()) {
+          return detailRecord.reason;
+        }
+      }
+    }
+
+    if (Array.isArray(errorObj.errors) && errorObj.errors.length > 0) {
+      const firstBatchError = errorObj.errors[0];
+      if (firstBatchError && typeof firstBatchError === "object") {
+        const batchRecord = firstBatchError as Record<string, unknown>;
+        if (typeof batchRecord.message === "string" && batchRecord.message.trim()) {
+          return batchRecord.message;
+        }
+        if (typeof batchRecord.status === "string" && batchRecord.status.trim()) {
+          return batchRecord.status;
+        }
+      }
+    }
+
+    try {
+      return JSON.stringify(errorObj);
+    } catch {
+      return "";
+    }
+  };
+
   const contentType = response.headers.get("content-type") ?? "";
   const isJsonResponse = contentType.includes("application/json");
   const isEventStreamResponse = contentType.includes("text/event-stream");
@@ -1651,31 +1690,67 @@ export async function transformAntigravityResponse(
     const text = await response.text();
 
     if (!response.ok) {
-      let errorBody;
+      let errorBody: any;
       try {
         errorBody = JSON.parse(text);
       } catch {
         errorBody = { error: { message: text } };
       }
 
+      if (!errorBody || typeof errorBody !== "object") {
+        errorBody = { error: { message: String(errorBody ?? text) } };
+      }
+
+      if (!errorBody.error || typeof errorBody.error !== "object") {
+        errorBody.error = {
+          message: typeof errorBody.message === "string" ? errorBody.message : undefined,
+          status: typeof errorBody.status === "string" ? errorBody.status : undefined,
+          details: Array.isArray(errorBody.details) ? errorBody.details : undefined,
+          errors: Array.isArray(errorBody.errors) ? errorBody.errors : undefined,
+        };
+      }
+
+      // Extract retry headers from google.rpc.RetryInfo when present.
+      if (Array.isArray(errorBody?.error?.details)) {
+        const retryInfo = errorBody.error.details.find(
+          (detail: any) => detail?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo",
+        );
+
+        if (retryInfo?.retryDelay) {
+          const match = retryInfo.retryDelay.match(/^([\d.]+)s$/);
+          if (match && match[1]) {
+            const retrySeconds = parseFloat(match[1]);
+            if (!isNaN(retrySeconds) && retrySeconds > 0) {
+              const retryAfterSec = Math.ceil(retrySeconds).toString();
+              const retryAfterMs = Math.ceil(retrySeconds * 1000).toString();
+              headers.set("Retry-After", retryAfterSec);
+              headers.set("retry-after-ms", retryAfterMs);
+            }
+          }
+        }
+      }
+
       // Inject Debug Info
       if (errorBody?.error) {
-        const rawErrorMessage =
-          typeof errorBody.error.message === "string" && errorBody.error.message.length > 0
-            ? errorBody.error.message
-            : "Unknown error";
-        const errorType = detectErrorType(rawErrorMessage);
+        const extractedMessage = extractBestErrorMessage(errorBody.error) || "Unknown error";
         const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || "Unknown"}\nEffective Model: ${effectiveModel || "Unknown"}\nProject: ${projectId || "Unknown"}\nEndpoint: ${endpoint || "Unknown"}\nStatus: ${response.status}\nRequest ID: ${headers.get("x-request-id") || "N/A"}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ""}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ""}${toolDebugPayload ? `\nTool Debug Payload: ${toolDebugPayload}` : ""}`;
         const injectedDebug = debugText ? `\n\n${debugText}` : "";
-        errorBody.error.message = rawErrorMessage + debugInfo + injectedDebug;
+        errorBody.error.message = extractedMessage + debugInfo + injectedDebug;
 
-        // Check if this is a recoverable thinking error - throw to trigger retry
+        // Signal recoverable thinking errors via headers so caller can retry without throwing.
+        const firstDetailReason =
+          Array.isArray(errorBody?.error?.details) &&
+          errorBody.error.details[0] &&
+          typeof errorBody.error.details[0] === "object"
+            ? ((errorBody.error.details[0] as Record<string, unknown>).reason as string | undefined)
+            : undefined;
+        const errorType = detectErrorType(
+          [extractedMessage, typeof firstDetailReason === "string" ? firstDetailReason : ""]
+            .filter(Boolean)
+            .join(" "),
+        );
         if (errorType === "thinking_block_order") {
-          const recoveryError = new Error("THINKING_RECOVERY_NEEDED");
-          (recoveryError as any).recoveryType = errorType;
-          (recoveryError as any).originalError = errorBody;
-          (recoveryError as any).debugInfo = debugInfo;
-          throw recoveryError;
+          headers.set("x-antigravity-recovery-needed", errorType);
         }
 
         // Detect context length / prompt too long errors - signal to caller for toast
@@ -1703,25 +1778,6 @@ export async function transformAntigravityResponse(
           statusText: response.statusText,
           headers
         });
-      }
-
-      if (errorBody?.error?.details && Array.isArray(errorBody.error.details)) {
-        const retryInfo = errorBody.error.details.find(
-          (detail: any) => detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
-        );
-
-        if (retryInfo?.retryDelay) {
-          const match = retryInfo.retryDelay.match(/^([\d.]+)s$/);
-          if (match && match[1]) {
-            const retrySeconds = parseFloat(match[1]);
-            if (!isNaN(retrySeconds) && retrySeconds > 0) {
-              const retryAfterSec = Math.ceil(retrySeconds).toString();
-              const retryAfterMs = Math.ceil(retrySeconds * 1000).toString();
-              headers.set('Retry-After', retryAfterSec);
-              headers.set('retry-after-ms', retryAfterMs);
-            }
-          }
-        }
       }
     }
 

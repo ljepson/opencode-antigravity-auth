@@ -1185,10 +1185,19 @@ describe("AccountManager", () => {
 
       it("parses RATE_LIMIT_EXCEEDED from reason field", () => {
         expect(parseRateLimitReason("RATE_LIMIT_EXCEEDED", undefined)).toBe("RATE_LIMIT_EXCEEDED");
+        expect(parseRateLimitReason("TOO_MANY_REQUESTS", undefined)).toBe("RATE_LIMIT_EXCEEDED");
+        expect(parseRateLimitReason("RATE_LIMITED", undefined)).toBe("RATE_LIMIT_EXCEEDED");
       });
 
       it("parses MODEL_CAPACITY_EXHAUSTED from reason field", () => {
         expect(parseRateLimitReason("MODEL_CAPACITY_EXHAUSTED", undefined)).toBe("MODEL_CAPACITY_EXHAUSTED");
+        expect(parseRateLimitReason("RESOURCE_EXHAUSTED", undefined)).toBe("MODEL_CAPACITY_EXHAUSTED");
+      });
+
+      it("parses server errors from reason/status field", () => {
+        expect(parseRateLimitReason("UNAVAILABLE", undefined)).toBe("SERVER_ERROR");
+        expect(parseRateLimitReason("SERVICE_UNAVAILABLE", undefined)).toBe("SERVER_ERROR");
+        expect(parseRateLimitReason("INTERNAL", undefined)).toBe("SERVER_ERROR");
       });
 
       it("falls back to message parsing when reason is absent", () => {

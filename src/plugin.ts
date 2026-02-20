@@ -955,15 +955,25 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
   }
 
   const error = (body as { error?: unknown }).error;
-  const message = error && typeof error === "object" 
-    ? (error as { message?: string }).message 
+  const message = error && typeof error === "object"
+    ? (error as { message?: string }).message
+    : undefined;
+  const status = error && typeof error === "object"
+    ? (error as { status?: string }).status
     : undefined;
 
-  const details = error && typeof error === "object" 
-    ? (error as { details?: unknown[] }).details 
+  const details = error && typeof error === "object"
+    ? (error as { details?: unknown[] }).details
+    : undefined;
+  const batchErrors = error && typeof error === "object"
+    ? (error as { errors?: unknown[] }).errors
     : undefined;
 
   let reason: string | undefined;
+  if (!reason && typeof status === "string" && status.trim()) {
+    reason = status;
+  }
+
   if (Array.isArray(details)) {
     for (const detail of details) {
       if (!detail || typeof detail !== "object") continue;
@@ -973,6 +983,13 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
         if (typeof detailReason === "string") {
           reason = detailReason;
           break;
+        }
+      }
+
+      if (!reason) {
+        const genericReason = (detail as { reason?: string }).reason;
+        if (typeof genericReason === "string" && genericReason.trim()) {
+          reason = genericReason;
         }
       }
     }
@@ -996,13 +1013,28 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
       const metadata = (detail as { metadata?: Record<string, string> }).metadata;
       if (metadata && typeof metadata === "object") {
         const quotaResetDelay = metadata.quotaResetDelay;
-        const quotaResetTime = metadata.quotaResetTimeStamp;
+        const quotaResetTime = metadata.quotaResetTimeStamp ?? metadata.quotaResetTimestamp;
         if (typeof quotaResetDelay === "string") {
           const quotaResetDelayMs = parseDurationToMs(quotaResetDelay);
           if (quotaResetDelayMs !== null) {
             return { retryDelayMs: quotaResetDelayMs, message, quotaResetTime, reason };
           }
         }
+      }
+    }
+  }
+
+  if (Array.isArray(batchErrors) && batchErrors.length > 0) {
+    const firstBatchError = batchErrors[0];
+    if (firstBatchError && typeof firstBatchError === "object") {
+      const batchReason = (firstBatchError as { reason?: string; status?: string }).reason
+        ?? (firstBatchError as { reason?: string; status?: string }).status;
+      if (!reason && typeof batchReason === "string" && batchReason.trim()) {
+        reason = batchReason;
+      }
+      const batchMessage = (firstBatchError as { message?: string }).message;
+      if (!message && typeof batchMessage === "string" && batchMessage.trim()) {
+        return { retryDelayMs: null, message: batchMessage, reason };
       }
     }
   }
@@ -1018,7 +1050,7 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
     }
   }
 
-  return { retryDelayMs: null, message, reason };
+  return { retryDelayMs: null, message: message ?? status, reason };
 }
 
 async function extractRetryInfoFromBody(response: Response): Promise<RateLimitBodyInfo> {
@@ -1452,6 +1484,55 @@ export const createAntigravityPlugin = (providerId: string) => async (
       return {
         apiKey: "",
         async fetch(input, init) {
+          const jsonErrorResponse = (
+            status: number,
+            type: string,
+            message: string,
+          ): Response =>
+            new Response(
+              JSON.stringify({
+                type: "error",
+                error: {
+                  type,
+                  message,
+                },
+              }),
+              {
+                status,
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+
+          const errorToResponse = (
+            error: Error | null,
+            fallbackMessage: string,
+            fallbackStatus = 503,
+          ): Response => {
+            const message = error?.message || fallbackMessage;
+            const lower = message.toLowerCase();
+
+            if (
+              lower.includes("rate-limit") ||
+              lower.includes("rate limited") ||
+              lower.includes("quota")
+            ) {
+              return jsonErrorResponse(429, "rate_limit_error", message);
+            }
+            if (
+              lower.includes("auth") ||
+              lower.includes("refresh token") ||
+              lower.includes("access token") ||
+              lower.includes("login")
+            ) {
+              return jsonErrorResponse(401, "auth_error", message);
+            }
+            if (lower.includes("aborted")) {
+              return jsonErrorResponse(499, "aborted_error", message);
+            }
+
+            return jsonErrorResponse(fallbackStatus, "upstream_error", message);
+          };
+
           if (!isGenerativeLanguageRequest(input)) {
             return fetch(input, init);
           }
@@ -1462,7 +1543,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
           }
 
           if (accountManager.getAccountCount() === 0) {
-            throw new Error("No Antigravity accounts configured. Run `opencode auth login`.");
+            return jsonErrorResponse(
+              401,
+              "auth_error",
+              "No Antigravity accounts configured. Run `opencode auth login`.",
+            );
           }
 
           const urlString = toUrlString(input);
@@ -1496,8 +1581,13 @@ export const createAntigravityPlugin = (providerId: string) => async (
           // Helper to check if request was aborted
           const checkAborted = () => {
             if (abortSignal?.aborted) {
-              throw abortSignal.reason instanceof Error ? abortSignal.reason : new Error("Aborted");
+              return errorToResponse(
+                abortSignal.reason instanceof Error ? abortSignal.reason : new Error("Aborted"),
+                "Request aborted.",
+                499,
+              );
             }
+            return null;
           };
 
           // Use while(true) loop to handle rate limits with backoff
@@ -1542,7 +1632,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
 
           while (true) {
             // Check for abort at the start of each iteration
-            checkAborted();
+            const abortedResponse = checkAborted();
+            if (abortedResponse) {
+              return abortedResponse;
+            }
             
             const accountCount = accountManager.getAccountCount();
             const routingDecision = resolveHeaderRoutingDecision(urlString, family, config);
@@ -1554,7 +1647,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
             } = routingDecision;
             
             if (accountCount === 0) {
-              throw new Error("No Antigravity accounts available. Run `opencode auth login`.");
+              return jsonErrorResponse(
+                401,
+                "auth_error",
+                "No Antigravity accounts available. Run `opencode auth login`.",
+              );
             }
 
             const softQuotaCacheTtlMs = computeSoftQuotaCacheTtlMs(
@@ -1603,10 +1700,12 @@ export const createAntigravityPlugin = (providerId: string) => async (
                     `All accounts over ${threshold}% quota threshold. Resets in ${waitTimeFormatted}.`,
                     "error"
                   );
-                  throw new Error(
+                  return jsonErrorResponse(
+                    429,
+                    "rate_limit_error",
                     `Quota protection: All ${accountCount} account(s) are over ${threshold}% usage for ${family}. ` +
-                    `Quota resets in ${waitTimeFormatted}. ` +
-                    `Add more accounts, wait for quota reset, or set soft_quota_threshold_percent: 100 to disable.`
+                      `Quota resets in ${waitTimeFormatted}. ` +
+                      "Add more accounts, wait for quota reset, or set soft_quota_threshold_percent: 100 to disable.",
                   );
                 }
                 
@@ -1618,7 +1717,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   softQuotaToastShown = true;
                 }
                 
-                await sleep(softQuotaWaitMs, abortSignal);
+                try {
+                  await sleep(softQuotaWaitMs, abortSignal);
+                } catch (error) {
+                  return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                }
                 continue;
               }
 
@@ -1653,10 +1756,12 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 );
                 
                 // Return a proper rate limit error response
-                throw new Error(
+                return jsonErrorResponse(
+                  429,
+                  "rate_limit_error",
                   `All ${accountCount} account(s) rate-limited for ${family}. ` +
-                  `Quota resets in ${waitTimeFormatted}. ` +
-                  `Add more accounts with \`opencode auth login\` or wait and retry.`
+                    `Quota resets in ${waitTimeFormatted}. ` +
+                    "Add more accounts with `opencode auth login` or wait and retry.",
                 );
               }
 
@@ -1666,7 +1771,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
               }
 
               // Wait for the rate-limit cooldown to expire, then retry
-              await sleep(waitMs, abortSignal);
+              try {
+                await sleep(waitMs, abortSignal);
+              } catch (error) {
+                return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+              }
               continue;
             }
 
@@ -1747,7 +1856,9 @@ export const createAntigravityPlugin = (providerId: string) => async (
                       log.error("Failed to clear stored Antigravity OAuth credentials", { error: String(storeError) });
                     }
 
-                    throw new Error(
+                    return jsonErrorResponse(
+                      401,
+                      "auth_error",
                       "All Antigravity accounts have invalid refresh tokens. Run `opencode auth login` and reauthenticate.",
                     );
                   }
@@ -1772,7 +1883,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
             if (!accessToken) {
               lastError = new Error("Missing access token");
               if (accountCount <= 1) {
-                throw lastError;
+                return jsonErrorResponse(401, "auth_error", "Missing access token");
               }
               continue;
             }
@@ -1997,7 +2108,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 if (config.request_jitter_max_ms > 0) {
                   const jitterMs = Math.floor(Math.random() * config.request_jitter_max_ms);
                   if (jitterMs > 0) {
-                    await sleep(jitterMs, abortSignal);
+                    try {
+                      await sleep(jitterMs, abortSignal);
+                    } catch (error) {
+                      return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                    }
                   }
                 }
 
@@ -2051,7 +2166,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                        "warning",
                      );
                      
-                     await sleep(waitMs, abortSignal);
+                     try {
+                       await sleep(waitMs, abortSignal);
+                     } catch (error) {
+                       return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                     }
                      
                      // CRITICAL FIX: Decrement i so that the loop 'continue' retries the SAME endpoint index
                      // (i++ in the loop will bring it back to the current index)
@@ -2067,7 +2186,9 @@ export const createAntigravityPlugin = (providerId: string) => async (
                         if (newFingerprint) {
                           pushDebug(`Fingerprint regenerated for account ${account.index}`);
                         }
-                        continue;
+                        accountManager.markRateLimited(account, waitMs, family, headerStyle, model);
+                        shouldSwitchAccount = true;
+                        break;
                       }
                   }
 
@@ -2113,7 +2234,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   // Progressive retry for standard 429s: 1st 429 → 1s then switch (if enabled) or retry same
                   if (attempt === 1 && rateLimitReason !== "QUOTA_EXHAUSTED") {
                     await showToast(`Rate limited. Quick retry in 1s...`, "warning");
-                    await sleep(FIRST_RETRY_DELAY_MS, abortSignal);
+                    try {
+                      await sleep(FIRST_RETRY_DELAY_MS, abortSignal);
+                    } catch (error) {
+                      return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                    }
                     
                     // CacheFirst mode: wait for same account if within threshold (preserves prompt cache)
                     if (config.scheduling_mode === 'cache_first') {
@@ -2123,7 +2248,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                         pushDebug(`cache_first: waiting ${effectiveDelayMs}ms for same account to recover`);
                         await showToast(`⏳ Waiting ${Math.ceil(effectiveDelayMs / 1000)}s for same account (prompt cache preserved)...`, "info");
                         accountManager.markRateLimitedWithReason(account, family, headerStyle, model, rateLimitReason, serverRetryMs);
-                        await sleep(effectiveDelayMs, abortSignal);
+                        try {
+                          await sleep(effectiveDelayMs, abortSignal);
+                        } catch (error) {
+                          return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                        }
                         // Retry same endpoint after wait
                         i -= 1;
                         continue;
@@ -2154,7 +2283,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                       if (hasOtherAccountWithAntigravity(account)) {
                         pushDebug(`antigravity exhausted on account ${account.index}, but available on others. Switching account.`);
                         await showToast(`Rate limited again. Switching account in 5s...`, "warning");
-                        await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
+                        try {
+                          await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
+                        } catch (error) {
+                          return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                        }
                         shouldSwitchAccount = true;
                         break;
                       }
@@ -2208,7 +2341,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                       ? ` (quota resets ${bodyInfo.quotaResetTime})`
                       : ``;
                     await showToast(`Rate limited again. Switching account in 5s...${quotaMsg}`, "warning");
-                    await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
+                    try {
+                      await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
+                    } catch (error) {
+                      return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                    }
                     
                     lastFailure = {
                       response,
@@ -2245,7 +2382,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                       toolDebugPayload: prepared.toolDebugPayload,
                     };
                     
-                    await sleep(expBackoffMs, abortSignal);
+                    try {
+                      await sleep(expBackoffMs, abortSignal);
+                    } catch (error) {
+                      return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                    }
                     shouldSwitchAccount = true;
                     break;
                   }
@@ -2384,7 +2525,11 @@ export const createAntigravityPlugin = (providerId: string) => async (
                         `Empty response received. Retrying (${currentAttempts}/${maxAttempts})...`,
                         "warning"
                       );
-                      await sleep(retryDelayMs, abortSignal);
+                      try {
+                        await sleep(retryDelayMs, abortSignal);
+                      } catch (error) {
+                        return errorToResponse(error instanceof Error ? error : new Error(String(error)), "Request aborted.");
+                      }
                       continue; // Retry the endpoint loop
                     }
                     
@@ -2416,6 +2561,38 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   prepared.toolDebugPayload,
                   debugLines,
                 );
+
+                const recoveryNeeded = transformedResponse.headers.get("x-antigravity-recovery-needed");
+                if (recoveryNeeded === "thinking_block_order") {
+                  if (!forceThinkingRecovery) {
+                    pushDebug("thinking-recovery: API error detected, retrying with forced recovery");
+                    forceThinkingRecovery = true;
+                    i = -1;
+                    continue;
+                  }
+
+                  let recoveryMessage = "Session recovery failed";
+                  try {
+                    const recoveryPayload = await transformedResponse.clone().json() as any;
+                    const candidateMessage = recoveryPayload?.error?.message;
+                    if (typeof candidateMessage === "string" && candidateMessage.trim()) {
+                      recoveryMessage = candidateMessage;
+                    }
+                  } catch {
+                    // Leave default message.
+                  }
+
+                  return new Response(JSON.stringify({
+                    type: "error",
+                    error: {
+                      type: "unrecoverable_error",
+                      message: `${recoveryMessage}\n\n[RECOVERY] Thinking block corruption could not be resolved. Try starting a new session.`,
+                    },
+                  }), {
+                    status: 400,
+                    headers: { "Content-Type": "application/json" },
+                  });
+                }
 
                 // Check for context errors and show appropriate toast
                 const contextError = transformedResponse.headers.get("x-antigravity-context-error");
@@ -2508,7 +2685,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   );
                 }
 
-                throw lastError || new Error("All Antigravity endpoints failed");
+                return errorToResponse(lastError, "All Antigravity endpoints failed");
               }
 
               continue;
@@ -2532,7 +2709,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
               );
             }
 
-            throw lastError || new Error("All Antigravity accounts failed");
+            return errorToResponse(lastError, "All Antigravity accounts failed");
           }
         },
       };
