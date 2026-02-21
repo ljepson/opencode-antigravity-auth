@@ -32,6 +32,7 @@ import {
   transformAntigravityResponse,
 } from "./plugin/request";
 import { resolveModelWithTier } from "./plugin/transform/model-resolver";
+import { isGemini31Model } from "./plugin/transform/gemini";
 import {
   isEmptyResponseBody,
   createSyntheticErrorResponse,
@@ -2074,6 +2075,13 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 continue;
               }
 
+              // Skip sandbox endpoints for Gemini 3.1 models - sandboxes don't support them yet,
+              // causing fetch to hang indefinitely
+              if (currentEndpoint !== ANTIGRAVITY_ENDPOINT_PROD && model && isGemini31Model(model)) {
+                pushDebug(`Skipping sandbox endpoint ${currentEndpoint} for gemini-3.1 model ${model}`);
+                continue;
+              }
+
               try {
                 const prepared = prepareAntigravityRequest(
                   input,
@@ -2122,7 +2130,26 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   tokenConsumed = getTokenTracker().consume(account.index);
                 }
 
-                const response = await fetch(prepared.request, prepared.init);
+                // Build fetch signal: combine abort signal with timeout
+                const timeoutMs = config.fetch_timeout_seconds > 0
+                  ? (prepared.streaming ? config.fetch_timeout_seconds * 2 : config.fetch_timeout_seconds) * 1000
+                  : 0;
+
+                let fetchSignal: AbortSignal | undefined;
+                if (timeoutMs > 0) {
+                  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+                  fetchSignal = abortSignal
+                    ? AbortSignal.any([abortSignal, timeoutSignal])
+                    : timeoutSignal;
+                } else {
+                  fetchSignal = abortSignal;
+                }
+
+                const fetchInit = fetchSignal
+                  ? { ...prepared.init, signal: fetchSignal }
+                  : prepared.init;
+
+                const response = await fetch(prepared.request, fetchInit);
                 pushDebug(`status=${response.status} ${response.statusText}`);
 
 
@@ -2616,6 +2643,13 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 if (tokenConsumed) {
                   getTokenTracker().refund(account.index);
                   tokenConsumed = false;
+                }
+
+                if (error instanceof Error && error.name === "TimeoutError") {
+                  const effectiveTimeoutMs = config.fetch_timeout_seconds > 0
+                    ? (config.fetch_timeout_seconds * 1000) + " (or 2x for streaming)"
+                    : "none";
+                  pushDebug(`fetch timeout (${effectiveTimeoutMs}) on endpoint ${currentEndpoint}`);
                 }
 
                 // Handle recoverable thinking errors - retry with forced recovery

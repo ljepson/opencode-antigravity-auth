@@ -170,6 +170,14 @@ export function isGemini3Model(model: string): boolean {
 }
 
 /**
+ * Check if a model is Gemini 3.1 specifically.
+ * These models may not be supported on sandbox endpoints.
+ */
+export function isGemini31Model(model: string): boolean {
+  return /gemini-3\.1/i.test(model);
+}
+
+/**
  * Check if a model is Gemini 2.5 (uses numeric thinkingBudget).
  */
 export function isGemini25Model(model: string): boolean {

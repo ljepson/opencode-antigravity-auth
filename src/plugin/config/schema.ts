@@ -426,6 +426,15 @@ export const AntigravityConfigSchema = z.object({
   // =========================================================================
   
   /**
+   * Fetch timeout in seconds. Applied per-endpoint attempt.
+   * Streaming requests get 2x this value.
+   * Set to 0 to disable timeout (not recommended).
+   *
+   * @default 120
+   */
+  fetch_timeout_seconds: z.number().min(0).max(600).default(120),
+
+  /**
    * Enable automatic plugin updates.
    * @default true
    */
@@ -470,6 +479,7 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   soft_quota_threshold_percent: 90,
   quota_refresh_interval_minutes: 15,
   soft_quota_cache_ttl_minutes: "auto",
+  fetch_timeout_seconds: 120,
   auto_update: true,
   signature_cache: {
     enabled: true,

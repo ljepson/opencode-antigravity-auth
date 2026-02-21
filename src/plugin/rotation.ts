@@ -9,6 +9,8 @@
  * Used by 'hybrid' strategy for improved ban prevention and load distribution.
  */
 
+import { isDebugEnabled, debugLogToFile } from "./debug";
+
 // ============================================================================
 // HEALTH SCORE SYSTEM
 // ============================================================================
@@ -253,10 +255,25 @@ export function selectHybridAccount(
   currentAccountIndex: number | null = null,
   minHealthScore: number = 50,
 ): number | null {
+  const debug = isDebugEnabled();
+
+  // Log candidate filtering
+  if (debug) {
+    for (const acc of accounts) {
+      const reasons: string[] = [];
+      if (acc.isRateLimited) reasons.push("rate-limited");
+      if (acc.isCoolingDown) reasons.push("cooling-down");
+      if (acc.healthScore < minHealthScore) reasons.push(`health-low(${acc.healthScore}<${minHealthScore})`);
+      if (!tokenTracker.hasTokens(acc.index)) reasons.push("no-tokens");
+      const status = reasons.length === 0 ? "eligible" : reasons.join(", ");
+      debugLogToFile(`[hybrid-select] account=${acc.index} status=${status} health=${acc.healthScore} tokens=${tokenTracker.getTokens(acc.index).toFixed(1)}`);
+    }
+  }
+
   const candidates = accounts
-    .filter(acc => 
-      !acc.isRateLimited && 
-      !acc.isCoolingDown && 
+    .filter(acc =>
+      !acc.isRateLimited &&
+      !acc.isCoolingDown &&
       acc.healthScore >= minHealthScore &&
       tokenTracker.hasTokens(acc.index)
     )
@@ -266,6 +283,7 @@ export function selectHybridAccount(
     }));
 
   if (candidates.length === 0) {
+    if (debug) debugLogToFile(`[hybrid-select] no candidates available`);
     return null;
   }
 
@@ -284,6 +302,13 @@ export function selectHybridAccount(
     })
     .sort((a, b) => b.score - a.score);
 
+  // Log score breakdown
+  if (debug) {
+    for (const s of scored) {
+      debugLogToFile(`[hybrid-select] account=${s.index} baseScore=${s.baseScore.toFixed(1)} stickiness=${s.isCurrent ? STICKINESS_BONUS : 0} total=${s.score.toFixed(1)}${s.isCurrent ? " (current)" : ""}`);
+    }
+  }
+
   const best = scored[0];
   if (!best) {
     return null;
@@ -296,8 +321,12 @@ export function selectHybridAccount(
     // (compare base scores to avoid circular stickiness bonus comparison)
     const advantage = best.baseScore - currentCandidate.baseScore;
     if (advantage < SWITCH_THRESHOLD) {
+      if (debug) debugLogToFile(`[hybrid-select] stickiness held: best=${best.index}(${best.baseScore.toFixed(1)}) advantage=${advantage.toFixed(1)} < threshold=${SWITCH_THRESHOLD}, keeping current=${currentCandidate.index}`);
       return currentCandidate.index;
     }
+    if (debug) debugLogToFile(`[hybrid-select] switching: ${currentCandidate.index} -> ${best.index}, advantage=${advantage.toFixed(1)} >= threshold=${SWITCH_THRESHOLD}`);
+  } else if (debug) {
+    debugLogToFile(`[hybrid-select] selected account=${best.index}${best.isCurrent ? " (sticky)" : ""}`);
   }
 
   return best.index;

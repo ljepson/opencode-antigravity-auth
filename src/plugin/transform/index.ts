@@ -48,6 +48,7 @@ export type { ClaudeTransformOptions, ClaudeTransformResult } from "./claude";
 export {
   isGeminiModel,
   isGemini3Model,
+  isGemini31Model,
   isGemini25Model,
   isImageGenerationModel,
   buildGemini3ThinkingConfig,
