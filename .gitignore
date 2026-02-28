@@ -47,3 +47,7 @@ opencode/
 opencode-better-antigravity-auth/
 
 docs/triage.md
+INSTALL.md
+USAGE.md
+repomix-output.xml
+*.tmp
